@@ -16,7 +16,7 @@ bl_info = {
     "author": "Brian Hynds",
     "version": (1, 0, 1),
     "blender": (2, 93, 0),
-    "location": "File > Import > LAS data",
+    "location": "File > Import > LASdata",
     "description": "LiDAR Importer",
     "warning": "",
     "doc_url": "",
@@ -53,16 +53,90 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
     filename_ext = ".las;.laz"  # Add support for LAZ files
     filter_glob: StringProperty(default="*.las;*.laz", options={'HIDDEN'})  # Update the filter_glob to include LAZ files
 
+
+    def normalize_attribute(self, attr_array):
+        return (attr_array - np.min(attr_array)) / (np.ptp(attr_array) + 1e-5)
+
+
+    def import_points_as_spheres(self, context, points, attr_array, lidar_info, sphere_radius=0.025):
+        # Create a base UV sphere mesh once
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=sphere_radius, segments=32, ring_count=16, location=(0, 0, 0))
+        base_sphere = bpy.context.object
+        base_sphere.name = "BasePointSphere"
+        base_mesh = base_sphere.data
+
+        # Create a material using vertex colors
+        mat = bpy.data.materials.new(name="PointColorMat")
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+
+        output = nodes.new(type='ShaderNodeOutputMaterial')
+        diffuse = nodes.new(type='ShaderNodeBsdfDiffuse')
+        vc_node = nodes.new(type='ShaderNodeVertexColor')
+        vc_node.layer_name = "Col"
+
+        links.new(vc_node.outputs['Color'], diffuse.inputs['Color'])
+        links.new(diffuse.outputs['BSDF'], output.inputs['Surface'])
+
+        # Create spheres for each point
+        for i, point in enumerate(points):
+            mesh_copy = base_mesh.copy()
+            obj = bpy.data.objects.new(f"PointSphere_{i}", mesh_copy)
+            obj.location = Vector(point)
+            context.collection.objects.link(obj)
+
+            # Assign material
+            obj.data.materials.append(mat)
+
+            # Add vertex color and assign grayscale based on attribute
+            if not mesh_copy.vertex_colors:
+                mesh_copy.vertex_colors.new(name="Col")
+
+            color_layer = mesh_copy.vertex_colors["Col"]
+            color = float(attr_array[i])
+            for loop in color_layer.data:
+                loop.color = (color, color, color, 1.0)
+
+        # Delete the base sphere to avoid clutter
+        bpy.data.objects.remove(base_sphere, do_unlink=True)
+
+
     def execute(self, context):
+        wanted_attribute = "intensity"  # Change to 'amplitude', etc. if needed
+
+        with laspy.open(self.filepath) as infile:
+            las = infile.read()
+            points = np.vstack((las.x, las.y, las.z)).T
+
+            # Normalize selected attribute
+            if wanted_attribute in las.point_format.dimension_names:
+                attr_raw = las[wanted_attribute]
+                attr_array = self.normalize_attribute(attr_raw)
+            else:
+                self.report({'WARNING'}, f"Attribute '{wanted_attribute}' not found in file.")
+                attr_array = np.zeros(len(points))
+
+            # Prepare metadata
+            lidar_info = {
+                'filepath': self.filepath,
+                'point_format': infile.header.point_format,
+                'point_count': infile.header.point_count,
+                'header': infile.header
+            }
+
+        self.import_points_as_spheres(context, points, attr_array, lidar_info)
+
+        return {'FINISHED'}
+
+    def execute_old(self, context):
         # Read LAS/LAZ file
         with laspy.open(self.filepath) as infile:
-            # Get LAS points
+            # # Get LAS points
             num_points_to_read = infile.header.point_count
-            all_points = infile.read_points(n=num_points_to_read)
-            points = np.array([(point['X'] * infile.header.x_scale + infile.header.x_offset,
-                                point['Y'] * infile.header.y_scale + infile.header.y_offset,
-                                point['Z'] * infile.header.z_scale + infile.header.z_offset)
-                                for point in all_points])
+            las = infile.read()
+            points = np.vstack((las.x, las.y, las.z)).T
 
             # Prepare LiDAR info
             lidar_info = {
@@ -77,10 +151,10 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
         return {'FINISHED'}
 
-    def import_points_as_mesh(self, context, points, lidar_info):
+    def import_points_as_mesh_old(self, context, points, lidar_info):
         # Create a new mesh object
-        mesh = bpy.data.meshes.new("LAS Data")
-        obj = bpy.data.objects.new("LAS Data", mesh)
+        mesh = bpy.data.meshes.new("LASdata")
+        obj = bpy.data.objects.new("LASdata", mesh)
 
         # Link the mesh to the scene
         context.collection.objects.link(obj)
