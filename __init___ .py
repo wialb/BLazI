@@ -148,11 +148,9 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
             color_ramp = nodes.new(type='ShaderNodeValToRGB')
             attr_node = nodes.new(type='ShaderNodeAttribute')
             attr_node.attribute_name = vcol_layer_name  # Use the vertex color layer name
+            # Connect nodes
             links.new(attr_node.outputs['Color'], color_ramp.inputs['Fac'])
             links.new(color_ramp.outputs['Color'], diffuse.inputs['Color'])
-
-            # Connect nodes
-            links.new(attr_node.outputs['Color'], diffuse.inputs['Color'])
             links.new(diffuse.outputs['BSDF'], output.inputs['Surface'])
 
             # Position nodes nicely
@@ -212,11 +210,11 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
         # Assign vertex colors
         if list_attr_name:
             for attr_array, attr_name in zip(input_attributes, list_attr_name):
-                # Normalize the attribute array to [0, 1]
                 arr = np.asarray(attr_array, dtype=np.float32)
-                # min_val = np.min(arr)
-                # max_val = np.max(arr)
-                # norm_attr = (arr - min_val) / (max_val - min_val + 1e-8)
+                # Normalize the attribute array to [0, 1]
+                min_val = np.min(arr)
+                max_val = np.max(arr)
+                arr = (arr - min_val) / (max_val - min_val + 1e-8)
 
                 mesh.attributes.new(name=attr_name, type='FLOAT', domain='POINT')
                 mesh.attributes[attr_name].data.foreach_set("value", arr)
