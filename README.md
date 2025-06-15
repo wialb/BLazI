@@ -14,13 +14,16 @@ import sys; sys.executable
 ```
 This will tell you where the python interpreter is that Blender is using.  For example: '/usr/bin/python3.10'
 
-Now, open a Terminal and install laspy by replacing the path to the interpreter to the one you just discovered above:
+Now, open a Terminal and install laspy by replacing the path to the interpreter to the one you just discovered above. Then add `-m pip install laspy[lazrs]`, followed by `--target path/to/the/interpreter/site-packages`. Here is an example:
 
 Linux:
 ```
-/replace/with/path/to/python -m pip install laspy[lazrs]
+/usr/local/blender-4.4.3-linux-x64/4.4/python/bin/python3.11 -m pip install laspy[lazrs] --target /usr/local/blender-4.4.3-linux-x64/4.4/python/lib/python3.11/site-packages
+
 ```
-Note: You may need to use sudo on Linux if your OS requires it.
+Notes:
+  1. We recommand installing Blender from a `.tar` file rather than snap.
+  2. You may need to use sudo on Linux if your OS requires it.
 
 Windows (replace the path with the correct version):
 ```
