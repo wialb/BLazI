@@ -51,8 +51,6 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
     def execute(self, context):
         with laspy.open(self.filepath) as infile:
             las = infile.read()
-            num_points_to_read = infile.header.point_count
-            all_points = infile.read_points(n=num_points_to_read)
             points = np.vstack((las.x, las.y, las.z)).T
             all_attr_name = list(las.point_format.dimension_names)
             input_attributes = []
@@ -65,12 +63,15 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
                 list_attr_name.append(attr)
                 input_attributes.append(las[attr])
 
+            mins = np.asarray(input_attributes).min(axis=1)
+            maxs = np.asarray(input_attributes).max(axis=1)
+
             # Prepare metadata
             lidar_info = {
                 'filepath': self.filepath,
-                'point_format': infile.header.point_format,
                 'point_count': infile.header.point_count,
-                'header': infile.header
+                'mins': mins,
+                'maxs': maxs
             }
 
         self.import_points_as_mesh(context, points, lidar_info, input_attributes, list_attr_name)
@@ -122,7 +123,8 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
         # Check if attribute exists
         if vcol_layer_name not in [attr.name for attr in obj.data.attributes]:
             # Fallback to first available attribute
-            attr_names = obj.get("lidar_attr_names", "").split(",")
+            # attr_names = obj.get("lidar_attr_names", "").split(",")
+            attr_names = obj.get("lidar_attr_names", "")
             if attr_names and attr_names[0]:
                 vcol_layer_name = attr_names[0]
             else:
@@ -146,17 +148,21 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
             output = nodes.new(type='ShaderNodeOutputMaterial')
             diffuse = nodes.new(type='ShaderNodeBsdfDiffuse')
             color_ramp = nodes.new(type='ShaderNodeValToRGB')
+            map_range = nodes.new(type='ShaderNodeMapRange')
             attr_node = nodes.new(type='ShaderNodeAttribute')
+
             attr_node.attribute_name = vcol_layer_name  # Use the vertex color layer name
             # Connect nodes
-            links.new(attr_node.outputs['Color'], color_ramp.inputs['Fac'])
+            links.new(attr_node.outputs['Color'], map_range.inputs['Value'])
+            links.new(map_range.outputs['Result'], color_ramp.inputs['Fac'])
             links.new(color_ramp.outputs['Color'], diffuse.inputs['Color'])
             links.new(diffuse.outputs['BSDF'], output.inputs['Surface'])
 
             # Position nodes nicely
             attr_node.location = (-300, 0)
-            diffuse.location = (0, 0)
-            color_ramp.location = (-150, 0)
+            map_range.location = (-150, 0)
+            color_ramp.location = (0, 0)
+            diffuse.location = (150, 0)
             output.location = (300, 0)
 
         else:
@@ -167,7 +173,22 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
                 if node.type == 'ATTRIBUTE':
                     attr_node = node
                     break
+            if attr_node is None:
+                attr_node = mat.node_tree.nodes.new(type='ShaderNodeAttribute')
             attr_node.attribute_name = vcol_layer_name  # Use the vertex color layer name
+
+            # Find the first Map Range node, or create one if missing
+            map_range = None
+            for node in mat.node_tree.nodes:
+                if node.type == 'MAP_RANGE':
+                    map_range = node
+                    break
+            if map_range is None:
+                map_range = mat.node_tree.nodes.new(type='ShaderNodeMapRange')
+
+            idx = obj.get("lidar_attr_names", "").split(",").index(vcol_layer_name)
+            map_range.inputs['From Min'].default_value = obj['mins']
+            map_range.inputs['From Max'].default_value = obj['maxs']
 
         # Assign material to the object
         obj.data.materials.append(mat)
@@ -192,16 +213,9 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
     
         # Store LiDAR info in the object as separate custom properties
         obj['lidar_filepath'] = lidar_info['filepath'] 
-        obj['lidar_point_format'] = lidar_info['point_format'].id
         obj['lidar_point_count'] = lidar_info['point_count']
-        obj['lidar_version'] = get_attribute(lidar_info['header'], 'version')
-        obj['lidar_min'] = get_attribute(lidar_info['header'], 'min')
-        obj['lidar_max'] = get_attribute(lidar_info['header'], 'max')
-        obj['lidar_scale'] = get_attribute(lidar_info['header'], 'scale')
-        obj['lidar_offset'] = get_attribute(lidar_info['header'], 'offset')
-        obj['lidar_creation_date'] = get_attribute(lidar_info['header'], 'creation_date')
-        obj['lidar_gps_time_type'] = get_attribute(lidar_info['header'], 'gps_time_type')
-        obj['lidar_point_count_by_return'] = get_attribute(lidar_info['header'], 'point_count_by_return')
+        # obj['mins'] = get_attribute(lidar_info['mins'], 'mins', lidar_info['mins'])
+        # obj['maxs'] = get_attribute(lidar_info['maxs'], 'maxs', lidar_info['maxs'])
 
         # Create mesh vertices from points
         mesh.from_pydata(points_list, [], [])
@@ -211,29 +225,20 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
         if list_attr_name:
             for attr_array, attr_name in zip(input_attributes, list_attr_name):
                 arr = np.asarray(attr_array, dtype=np.float32)
-                # Normalize the attribute array to [0, 1]
-                min_val = np.min(arr)
-                max_val = np.max(arr)
-                arr = (arr - min_val) / (max_val - min_val + 1e-8)
 
                 mesh.attributes.new(name=attr_name, type='FLOAT', domain='POINT')
                 mesh.attributes[attr_name].data.foreach_set("value", arr)
             
             obj["lidar_attr_names"] = ",".join(list_attr_name)
-
         
         # Assign material using either RGB or first attribute
         selected_attr = context.scene.lidar_selected_attr if context.scene.lidar_selected_attr else list_attr_name[0]
+        idx = obj.get("lidar_attr_names", "").split(",").index(selected_attr)
+        obj['mins'] = get_attribute(lidar_info['mins'], 'mins', lidar_info['mins'])[idx]
+        obj['maxs'] = get_attribute(lidar_info['maxs'], 'maxs', lidar_info['maxs'])[idx]
+
         IMPORT_OT_las_data.assign_vertex_color_material(obj, selected_attr)
-
-        # Center the point cloud
-        min_coords = np.min(points, axis=0)
-        min_coords = Vector(min_coords)
-        # max_coords = np.max(points, axis=0)
-        # center = Vector((min_coords + max_coords) / 2)
-
-        for v in mesh.vertices:
-            v.co -= min_coords
+        
         obj.location = Vector((0, 0, 0))
 
         mesh.update()
@@ -275,10 +280,7 @@ class LIDAR_PT_InfoPanel(bpy.types.Panel):
         # Retrieve custom properties from the object
         obj = context.active_object
         if obj and obj.get('lidar_filepath'):
-            layout.label(text=f"Point Format: {obj.get('lidar_point_format', 'N/A')}")
-            # ... other info ...
-            if obj.get("lidar_attr_names"):
-                layout.prop(context.scene, "lidar_selected_attr", text="Color Attribute")
+            layout.prop(context.scene, "lidar_selected_attr", text="Color Attribute")
         else:
             layout.label(text="No LiDAR data available")
 
