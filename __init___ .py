@@ -155,8 +155,8 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
             # Position nodes nicely
             attr_node.location = (-300, 0)
-            color_ramp.location = (0, 0)
-            diffuse.location = (-150, 0)
+            diffuse.location = (0, 0)
+            color_ramp.location = (-150, 0)
             output.location = (300, 0)
 
         else:
