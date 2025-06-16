@@ -187,8 +187,8 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
                 map_range = mat.node_tree.nodes.new(type='ShaderNodeMapRange')
 
             idx = obj.get("lidar_attr_names", "").split(",").index(vcol_layer_name)
-            map_range.inputs['From Min'].default_value = obj['mins']
-            map_range.inputs['From Max'].default_value = obj['maxs']
+            map_range.inputs['From Min'].default_value = float(obj.get(f"{vcol_layer_name}_min", 0.0))
+            map_range.inputs['From Max'].default_value = float(obj.get(f"{vcol_layer_name}_max", 0.0))
 
         # Assign material to the object
         obj.data.materials.append(mat)
@@ -214,8 +214,8 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
         # Store LiDAR info in the object as separate custom properties
         obj['lidar_filepath'] = lidar_info['filepath'] 
         obj['lidar_point_count'] = lidar_info['point_count']
-        # obj['mins'] = get_attribute(lidar_info['mins'], 'mins', lidar_info['mins'])
-        # obj['maxs'] = get_attribute(lidar_info['maxs'], 'maxs', lidar_info['maxs'])
+        # obj['min'] = get_attribute(lidar_info['mins'], 'min', lidar_info['mins'])
+        # obj['max'] = get_attribute(lidar_info['maxs'], 'max', lidar_info['maxs'])
 
         # Create mesh vertices from points
         mesh.from_pydata(points_list, [], [])
@@ -223,19 +223,21 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
         # Assign vertex colors
         if list_attr_name:
-            for attr_array, attr_name in zip(input_attributes, list_attr_name):
+            for i, (attr_array, attr_name) in enumerate(zip(input_attributes, list_attr_name)):
                 arr = np.asarray(attr_array, dtype=np.float32)
 
                 mesh.attributes.new(name=attr_name, type='FLOAT', domain='POINT')
                 mesh.attributes[attr_name].data.foreach_set("value", arr)
+                obj[f"{attr_name}_min"] = lidar_info['mins'][i]
+                obj[f"{attr_name}_max"] = lidar_info['maxs'][i]
             
             obj["lidar_attr_names"] = ",".join(list_attr_name)
         
         # Assign material using either RGB or first attribute
         selected_attr = context.scene.lidar_selected_attr if context.scene.lidar_selected_attr else list_attr_name[0]
         idx = obj.get("lidar_attr_names", "").split(",").index(selected_attr)
-        obj['mins'] = get_attribute(lidar_info['mins'], 'mins', lidar_info['mins'])[idx]
-        obj['maxs'] = get_attribute(lidar_info['maxs'], 'maxs', lidar_info['maxs'])[idx]
+        obj['min'] = get_attribute(lidar_info['mins'], 'min', lidar_info['mins'])[idx]
+        obj['max'] = get_attribute(lidar_info['maxs'], 'max', lidar_info['maxs'])[idx]
 
         IMPORT_OT_las_data.assign_vertex_color_material(obj, selected_attr)
         
@@ -258,6 +260,9 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
             attr_name = context.scene.lidar_selected_attr
             # Re-assign the material with the new attribute
             IMPORT_OT_las_data.assign_vertex_color_material(obj, attr_name)
+            
+            obj['min'] = obj.get(f"{attr_name}_min", 0.0)
+            obj['max'] = obj.get(f"{attr_name}_max", 1.0)
 
     
     bpy.types.Scene.lidar_selected_attr = EnumProperty(
@@ -281,6 +286,13 @@ class LIDAR_PT_InfoPanel(bpy.types.Panel):
         obj = context.active_object
         if obj and obj.get('lidar_filepath'):
             layout.prop(context.scene, "lidar_selected_attr", text="Color Attribute")
+            # Show min/max for the selected attribute
+            attr_name = context.scene.lidar_selected_attr
+            min_val = obj.get(f"{attr_name}_min", 0.0)
+            max_val = obj.get(f"{attr_name}_max", 1.0)
+            if min_val is not None and max_val is not None:
+                layout.label(text=f"Min: {min_val}")
+                layout.label(text=f"Max: {max_val}")
         else:
             layout.label(text="No LiDAR data available")
 
