@@ -23,11 +23,12 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import os
 import bpy
 import laspy
 import numpy as np
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty, EnumProperty
+from bpy.props import StringProperty, CollectionProperty, EnumProperty
 from bpy.types import Operator
 from mathutils import Vector
 
@@ -45,36 +46,51 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
     filename_ext = ".las;.laz"  # Add support for LAZ files
     filter_glob: StringProperty(default="*.las;*.laz", options={'HIDDEN'})  # Update the filter_glob to include LAZ files
-
-
+    files: CollectionProperty(type=bpy.types.PropertyGroup)
 
     def execute(self, context):
-        with laspy.open(self.filepath) as infile:
+        import os
+
+        # If multiple files are selected, self.files will be non-empty
+        if self.files:
+            directory = os.path.dirname(self.filepath)
+            for file_elem in self.files:
+                file_path = os.path.join(directory, file_elem.name)
+                self.import_one_file(context, file_path)
+        else:
+            # Fallback: single file
+            self.import_one_file(context, self.filepath)
+
+        return {'FINISHED'}
+
+    def import_one_file(self, context, filepath):
+        with laspy.open(filepath) as infile:
             las = infile.read()
             points = np.vstack((las.x, las.y, las.z)).T
             all_attr_name = list(las.point_format.dimension_names)
             input_attributes = []
             list_attr_name = []
 
-            # Normalize selected attribute
             for attr in all_attr_name:
-                if attr in ['X', 'Y', 'Z'] or np.sum(list(las[attr])) == 0:
+                if np.sum(list(las[attr])) == 0:# or attr in ['X', 'Y', 'Z']::
                     continue
-                list_attr_name.append(attr)
-                input_attributes.append(las[attr])
+                arr = np.asarray(las[attr])
+                if arr.ndim == 1 and arr.shape[0] == las.header.point_count:
+                    list_attr_name.append(attr)
+                    input_attributes.append(arr)
 
-            mins = np.asarray(input_attributes).min(axis=1)
-            maxs = np.asarray(input_attributes).max(axis=1)
+            mins = np.asarray(input_attributes).min(axis=1) if input_attributes else []
+            maxs = np.asarray(input_attributes).max(axis=1) if input_attributes else []
 
-            # Prepare metadata
             lidar_info = {
-                'filepath': self.filepath,
+                'filepath': filepath,
                 'point_count': infile.header.point_count,
                 'mins': mins,
                 'maxs': maxs
             }
 
         self.import_points_as_mesh(context, points, lidar_info, input_attributes, list_attr_name)
+
 
         return {'FINISHED'}
 
@@ -146,24 +162,42 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
             # Add necessary nodes
             output = nodes.new(type='ShaderNodeOutputMaterial')
-            diffuse = nodes.new(type='ShaderNodeBsdfDiffuse')
+            principled = nodes.new(type='ShaderNodeBsdfPrincipled')
             color_ramp = nodes.new(type='ShaderNodeValToRGB')
             map_range = nodes.new(type='ShaderNodeMapRange')
             attr_node = nodes.new(type='ShaderNodeAttribute')
+
+            principled.inputs['Metallic'].default_value = 0.7
+            principled.inputs['Roughness'].default_value = 0.5
+            stops = [
+                (0.0, (0.0, 0.0, 0.0, 1.0)),   # Black
+                (0.125, (0.0, 0.0, 1.0, 1.0)),   # Blue
+                (0.25, (0.0, 1.0, 1.0, 1.0)),   # Cyan
+                (0.375, (0.0, 1.0, 0.0, 1.0)),   # Green
+                (0.50, (1.0, 1.0, 0.0, 1.0)),   # Yellow
+                (0.625, (1.0, 0.5, 0.0, 1.0)),   # Orange
+                (0.75, (1.0, 0.0, 0.0, 1.0)),   # Red
+                (0.875, (1.0, 0.0, 1.0, 1.0)),   # Magenta
+                (1.0, (1.0, 1.0, 1.0, 1.0)),   # White
+            ]
+
+            for pos, col in stops:
+                e = color_ramp.color_ramp.elements.new(pos)
+                e.color = col
 
             attr_node.attribute_name = vcol_layer_name  # Use the vertex color layer name
             # Connect nodes
             links.new(attr_node.outputs['Color'], map_range.inputs['Value'])
             links.new(map_range.outputs['Result'], color_ramp.inputs['Fac'])
-            links.new(color_ramp.outputs['Color'], diffuse.inputs['Color'])
-            links.new(diffuse.outputs['BSDF'], output.inputs['Surface'])
+            links.new(color_ramp.outputs['Color'], principled.inputs['Base Color'])
+            links.new(principled.outputs['BSDF'], output.inputs['Surface'])
 
             # Position nodes nicely
-            attr_node.location = (-300, 0)
-            map_range.location = (-150, 0)
+            attr_node.location = (-400, 0)
+            map_range.location = (-200, 0)
             color_ramp.location = (0, 0)
-            diffuse.location = (150, 0)
-            output.location = (300, 0)
+            principled.location = (300, 0)
+            output.location = (550, 0)
 
         else:
             mat = bpy.data.materials['LAS_Material']
@@ -223,27 +257,31 @@ class IMPORT_OT_las_data(Operator, ImportHelper):
 
         # Assign vertex colors
         if list_attr_name:
-            for i, (attr_array, attr_name) in enumerate(zip(input_attributes, list_attr_name)):
-                arr = np.asarray(attr_array, dtype=np.float32)
+            try:
+                for i, (attr_array, attr_name) in enumerate(zip(input_attributes, list_attr_name)):
+                    arr = np.asarray(attr_array, dtype=np.float32)
 
-                mesh.attributes.new(name=attr_name, type='FLOAT', domain='POINT')
-                mesh.attributes[attr_name].data.foreach_set("value", arr)
-                obj[f"{attr_name}_min"] = lidar_info['mins'][i]
-                obj[f"{attr_name}_max"] = lidar_info['maxs'][i]
-            
-            obj["lidar_attr_names"] = ",".join(list_attr_name)
+                    mesh.attributes.new(name=attr_name, type='FLOAT', domain='POINT')
+                    mesh.attributes[attr_name].data.foreach_set("value", arr)
+                    obj[f"{attr_name}_min"] = lidar_info['mins'][i]
+                    obj[f"{attr_name}_max"] = lidar_info['maxs'][i]
+                
+                obj["lidar_attr_names"] = ",".join(list_attr_name)
         
-        # Assign material using either RGB or first attribute
-        selected_attr = context.scene.lidar_selected_attr if context.scene.lidar_selected_attr else list_attr_name[0]
-        idx = obj.get("lidar_attr_names", "").split(",").index(selected_attr)
-        obj['min'] = get_attribute(lidar_info['mins'], 'min', lidar_info['mins'])[idx]
-        obj['max'] = get_attribute(lidar_info['maxs'], 'max', lidar_info['maxs'])[idx]
+                # Assign material using either RGB or first attribute
+                selected_attr = context.scene.lidar_selected_attr if context.scene.lidar_selected_attr else list_attr_name[0]
+                idx = obj.get("lidar_attr_names", "").split(",").index(selected_attr)
+                obj['min'] = get_attribute(lidar_info['mins'], 'min', lidar_info['mins'])[idx]
+                obj['max'] = get_attribute(lidar_info['maxs'], 'max', lidar_info['maxs'])[idx]
 
-        IMPORT_OT_las_data.assign_vertex_color_material(obj, selected_attr)
-        
-        obj.location = Vector((0, 0, 0))
+                IMPORT_OT_las_data.assign_vertex_color_material(obj, selected_attr)
+                
+                obj.location = Vector((0, 0, 0))
 
-        mesh.update()
+                mesh.update()
+
+            except:
+                pass
 
 
     def get_lidar_attr_items(self, context):
